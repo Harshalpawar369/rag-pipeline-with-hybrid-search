@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Legal RAG</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 860px; margin: 2rem auto; padding: 0 1rem; color: #1a1a1a; }
+  input, textarea { font: inherit; width: 100%; box-sizing: border-box; padding: .4rem; }
+  .row { margin: .5rem 0; }
+  #answer { white-space: pre-wrap; border: 1px solid #ccc; border-radius: 6px; padding: 1rem; min-height: 120px; }
+  #cites { font-size: .9em; color: #333; margin-top: .75rem; }
+  .disclaimer { font-size: .85em; color: #666; }
+  button { font: inherit; padding: .4rem .9rem; margin-right: .4rem; }
+</style>
+</head>
+<body>
+<h2>Legal RAG</h2>
+<div class="row"><label>Email<input id="email" type="email" value="alice@example.com"></label></div>
+<div class="row"><label>Password<input id="password" type="password"></label></div>
+<div class="row"><button id="login">Sign in</button> <span id="who" class="disclaimer"></span></div>
+<div class="row"><label>Matter IDs (comma-separated)<input id="matters"></label></div>
+<div class="row"><textarea id="question" rows="3" placeholder="Ask about the selected matters"></textarea></div>
+<div class="row">
+  <button id="ask">Ask</button>
+  <button id="stop">Stop</button>
+  <label><input type="checkbox" id="orig" style="width:auto"> include original (pre-tracked-change) text</label>
+</div>
+<p class="disclaimer">Research assistance only. Verify every answer against the source documents. This is not legal advice.</p>
+<div id="status" class="disclaimer"></div>
+<div id="answer"></div>
+<div id="cites"></div>
+<script>
+const SESSION = crypto.randomUUID();
+let ws = null, currentRequest = null, accessToken = null, answerEl = document.getElementById("answer");
+const esc = s => String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const setStatus = t => document.getElementById("status").textContent = t;
+
+// Sign in with the built-in OAuth2 password flow. The session token stays in memory only.
+document.getElementById("login").onclick = async () => {
+  const body = new URLSearchParams({username: document.getElementById("email").value.trim(),
+                                    password: document.getElementById("password").value});
+  const resp = await fetch("/auth/token", {method: "POST", body});
+  if (!resp.ok) return setStatus("sign-in failed");
+  accessToken = (await resp.json()).access_token;
+  document.getElementById("who").textContent = "signed in";
+  setStatus("");
+};
+
+function connect() {
+  return new Promise((resolve, reject) => {
+    if (!accessToken) return reject(new Error("sign in first"));
+    const scheme = location.protocol === "https:" ? "wss" : "ws";
+    ws = new WebSocket(`${scheme}://${location.host}/ws?token=${encodeURIComponent(accessToken)}`);
+    ws.onopen = () => resolve();
+    ws.onerror = () => reject(new Error("could not connect"));
+    ws.onclose = () => setStatus("disconnected");
+    ws.onmessage = e => handle(JSON.parse(e.data));
+  });
+}
+
+function handle(f) {
+  if (f.type === "ack") setStatus("thinking...");
+  else if (f.type === "token") answerEl.textContent += f.text;
+  else if (f.type === "done") {
+    setStatus("");
+    document.getElementById("cites").innerHTML = f.citations.map(c =>
+      `<div>[${esc(c.id)}] ${esc(c.title)} · ${esc(c.section_path || "unnumbered")} · p. ${esc(c.pages)} · ${esc(c.view_label)}</div>`).join("");
+  } else if (f.type === "error") setStatus(`error: ${f.message}`);
+}
+
+document.getElementById("ask").onclick = async () => {
+  const question = document.getElementById("question").value.trim();
+  const matter_ids = document.getElementById("matters").value.split(",").map(s => s.trim()).filter(Boolean);
+  if (!question || !matter_ids.length) return setStatus("enter a question and at least one matter id");
+  if (!accessToken) return setStatus("sign in first");
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    try { await connect(); } catch (e) { return setStatus(e.message); }
+  }
+  currentRequest = crypto.randomUUID();
+  answerEl.textContent = "";
+  document.getElementById("cites").innerHTML = "";
+  ws.send(JSON.stringify({type: "ask", request_id: currentRequest, session_id: SESSION,
+                          matter_ids, question, include_original: document.getElementById("orig").checked}));
+};
+
+document.getElementById("stop").onclick = () => {
+  if (ws && currentRequest) ws.send(JSON.stringify({type: "cancel", request_id: currentRequest}));
+};
+</script>
+</body>
+</html>
